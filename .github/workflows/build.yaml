@@ -1,0 +1,95 @@
+name: Build and Test
+on: [push, pull_request]
+jobs:
+  build-and-test-gcc-14:
+    name: gcc-14 build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Remove existing gcc and g++
+        run: |
+          sudo apt-get remove gcc g++
+          sudo apt-get autoremove
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        name: Install build tools
+        with:
+          packages: gcc-14 g++-14 libjson-perl libperlio-gzip-perl python3-pip
+
+      - name: Make gcov-14 available
+        run: |
+          sudo update-alternatives --install /usr/bin/gcov gcov /usr/bin/gcov-14 100
+          sudo update-alternatives --set gcov /usr/bin/gcov-14
+
+        # it wouldn't be a debian based distro without woefully outdated packages
+      - name: Install lcov
+        run: |
+          wget https://github.com/linux-test-project/lcov/releases/download/v2.4/lcov-2.4.tar.gz
+          tar -xzf lcov-2.4.tar.gz
+          cd lcov-2.4
+          sudo make install
+
+      - uses: actions/setup-python@v1
+      - name: Install gcovr
+        run: |
+          python3 -m pip install gcovr==8.4
+      - uses: BSFishy/meson-build@v1.0.3
+        name: Run tests with coverage
+        with:
+          action: test
+          setup-options: -Db_coverage=true -Dtests=enabled -Dcpp_args='-fprofile-abs-path'
+          meson-version: '1.10.0'
+          gcovr-version: '8.4'
+          directory: builddir
+        env:
+          CC: gcc-14
+          CXX: g++-14
+      - name: Generate coverage report
+        run: |
+          ninja -C builddir coverage
+      - uses: actions/upload-artifact@v6
+        name: Upload coverage report
+        with:
+          name: coverage-report
+          path: builddir/meson-logs/coveragereport
+          overwrite: true
+
+  build-and-test-clang-22:
+    name: clang-22 build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Add LLVM APT repository
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 22
+          sudo apt-get update
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        name: Install build tools
+        with:
+          packages: clang-22 clang-format-22 clang-tidy-22 python3-pip llvm-22 lld-22
+      - uses: actions/setup-python@v1
+      - name: Install gcovr
+        run: |
+          python3 -m pip install gcovr==8.4
+      - uses: BSFishy/meson-build@v1.0.3
+        name: Run tests with coverage
+        with:
+          action: test
+          setup-options: -Db_coverage=true -Dtests=enabled
+          meson-version: '1.10.0'
+          gcovr-version: '8.4'
+          directory: builddir
+        env:
+          CC: clang-22
+          CXX: clang++-22
+          LD: ld.lld-22
+      - name: Generate coverage report
+        run: |
+          ninja -C builddir coverage
+      - uses: actions/upload-artifact@v6
+        name: Upload coverage report
+        with:
+          name: coverage-report
+          path: builddir/meson-logs/coveragereport
+          overwrite: true

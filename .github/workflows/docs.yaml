@@ -1,0 +1,41 @@
+name: Documentation
+on: [push, pull_request]
+jobs:
+  doxygen-docs:
+    name: Generate Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        name: Install build tools
+        with:
+          packages: python3-pip doxygen graphviz
+      - uses: actions/setup-python@v1
+      - name: Install meson
+        run: |
+          python3 -m pip install meson==1.10.0
+      - name: Configure meson build
+        run: |
+          meson setup builddir -Ddocs=enabled
+      - name: Generate documentation
+        run: |
+          ninja -C builddir doxygen
+      - uses: actions/upload-artifact@v6
+        name: Upload documentation
+        with:
+          name: documentation
+          path: builddir/docs/html
+          overwrite: true
+      - name: Upload github pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: builddir/docs/html
+
+  deploy-docs:
+    name: Deploy Documentation to GitHub Pages
+    if: github.event_name == 'push' && contains(github.ref, '/heads/master')
+    needs: doxygen-docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4

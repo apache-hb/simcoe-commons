@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+
+inc = include_directories('include')
+
+src = files('src/limiting_flag.cpp')
+
+libsimcoe_concurrent = library(
+  'simcoe-concurrent',
+  src,
+  include_directories: inc,
+  version: meson.project_version(),
+  install: true,
+)
+
+simcoe_concurrent_dep = declare_dependency(
+  link_with: libsimcoe_concurrent,
+  include_directories: include_directories('include'),
+)
+
+install_headers(
+  'include/simcoe/concurrent/mailbox.hpp',
+  'include/simcoe/concurrent/limiting_flag.hpp',
+  subdir: 'simcoe/concurrent',
+)
+
+if gtest_main.found()
+  testcases = {
+    'mailbox': {
+      'sources': files('test/mailbox_test.cpp'),
+    },
+    'limiting flag': {
+      'sources': files('test/limiting_flag_test.cpp'),
+    },
+  }
+
+  foreach testcase_name, testcase_data : testcases
+    executable_name = 'simcoe_concurrent_' + testcase_name.replace(' ', '_') + '_test'
+    exe = executable(
+      executable_name,
+      testcase_data['sources'],
+      dependencies: [gtest_main, simcoe_concurrent_dep],
+    )
+    test(
+      testcase_name,
+      exe,
+      suite: 'concurrent',
+    )
+  endforeach
+endif

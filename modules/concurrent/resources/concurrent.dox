@@ -1,0 +1,4 @@
+/** @namespace sm::concurrent
+ *
+ * @brief Concurrency utilities and abstractions.
+ */

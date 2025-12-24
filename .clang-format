@@ -1,0 +1,10 @@
+---
+BasedOnStyle: Google
+AllowShortFunctionsOnASingleLine: Empty
+ColumnLimit: 200
+IndentWidth: 4
+AccessModifierOffset: -4
+IndentPPDirectives: AfterHash
+PackConstructorInitializers: Never
+BreakConstructorInitializers: BeforeComma
+SpacesBeforeTrailingComments: 1
