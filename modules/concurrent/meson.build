@@ -19,7 +19,14 @@ simcoe_concurrent_dep = declare_dependency(
   include_directories: include_directories('include'),
 )
 
+meson.override_dependency(
+  'simcoe-concurrent',
+  simcoe_concurrent_dep,
+)
+
 install_headers(
+  'include/simcoe/concurrent/exports.hpp',
+  'include/simcoe/concurrent/annotations.hpp',
   'include/simcoe/concurrent/mailbox.hpp',
   'include/simcoe/concurrent/limiting_flag.hpp',
   subdir: 'simcoe/concurrent',
