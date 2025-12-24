@@ -168,8 +168,8 @@ FILE_PATTERNS          = *.c \
 RECURSIVE              = YES
 EXCLUDE                =
 EXCLUDE_SYMLINKS       = NO
-EXCLUDE_PATTERNS       = test/*
-EXCLUDE_SYMBOLS        =
+EXCLUDE_PATTERNS       = */test/*
+EXCLUDE_SYMBOLS        = sm::detail*
 EXAMPLE_PATH           =
 EXAMPLE_PATTERNS       = *
 EXAMPLE_RECURSIVE      = NO
@@ -335,7 +335,7 @@ EXPAND_ONLY_PREDEF     = NO
 SEARCH_INCLUDES        = YES
 INCLUDE_PATH           =
 INCLUDE_FILE_PATTERNS  =
-PREDEFINED             =
+PREDEFINED             = __cpp_exceptions=199711L
 EXPAND_AS_DEFINED      =
 SKIP_FUNCTION_MACROS   = YES
 #---------------------------------------------------------------------------

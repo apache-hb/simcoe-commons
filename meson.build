@@ -25,6 +25,7 @@ doxygen = find_program(
   required: docs_opt,
 )
 
+subdir('modules/defer')
 subdir('modules/concurrent')
 
 if doxygen.found()
