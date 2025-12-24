@@ -3,7 +3,7 @@
 #pragma once
 
 #if __cpp_exceptions >= 199711L
-#   include <exception>
+#    include <exception>
 #endif // __cpp_exceptions >= 199711L
 
 namespace sm::detail {
@@ -15,18 +15,20 @@ enum class ErrDeferTag { eTag };
 
 } // namespace sm::detail
 
-template<typename F>
+template <typename F>
 constexpr auto operator+(sm::detail::DeferTag, F fn) {
     struct Inner {
         F fn;
-        ~Inner() noexcept { fn(); }
+        ~Inner() noexcept {
+            fn();
+        }
     };
 
     return Inner{fn};
 }
 
 #if __cpp_exceptions >= 199711L
-template<typename F>
+template <typename F>
 constexpr auto operator+(sm::detail::ErrDeferTag, F fn) {
     struct Inner {
         F fn;
@@ -67,10 +69,10 @@ constexpr auto operator+(sm::detail::ErrDeferTag, F fn) {
  * } // "World" is printed here
  * @endcode
  */
-#define SM_DEFER const auto SM_DETAIL_CONCAT(defer, __COUNTER__) = sm::detail::DeferTag::eTag + [&] ()
+#define SM_DEFER const auto SM_DETAIL_CONCAT(defer, __COUNTER__) = sm::detail::DeferTag::eTag + [&]()
 
 #if defined(SM_DEFER_AS_KEYWORD)
-#   define defer SM_DEFER
+#    define defer SM_DEFER
 #endif // defined(SM_DEFER_AS_KEYWORD)
 
 #if __cpp_exceptions >= 199711L
@@ -92,10 +94,10 @@ constexpr auto operator+(sm::detail::ErrDeferTag, F fn) {
  * } // nothing is printed here
  * @endcode
  */
-#   define SM_ERRDEFER const auto SM_DETAIL_CONCAT(errdefer, __COUNTER__) = sm::detail::ErrDeferTag::eTag + [&] ()
-#   if defined(SM_DEFER_AS_KEYWORD)
-#       define errdefer SM_ERRDEFER
-#   endif // defined(SM_DEFER_AS_KEYWORD)
-#endif // __cpp_exceptions >= 199711L
+#    define SM_ERRDEFER const auto SM_DETAIL_CONCAT(errdefer, __COUNTER__) = sm::detail::ErrDeferTag::eTag + [&]()
+#    if defined(SM_DEFER_AS_KEYWORD)
+#        define errdefer SM_ERRDEFER
+#    endif // defined(SM_DEFER_AS_KEYWORD)
+#endif     // __cpp_exceptions >= 199711L
 
 /** @} */

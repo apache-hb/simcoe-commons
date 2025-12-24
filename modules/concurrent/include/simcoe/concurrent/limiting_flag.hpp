@@ -2,11 +2,10 @@
 
 #pragma once
 
-#include <simcoe/concurrent/exports.hpp>
-
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <simcoe/concurrent/exports.hpp>
 
 #if __cpp_concepts >= 201907L
 #    include <concepts>
