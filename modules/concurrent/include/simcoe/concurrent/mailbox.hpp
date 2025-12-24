@@ -50,12 +50,12 @@ class AtomicMailbox {
     // on windows it works fine, the performance difference is well into
     // placebo territory so i'll leave it out for now.
     // alignas(std::hardware_destructive_interference_size)
-    std::atomic<int> mState = 0;
+    std::atomic<int> mState{};
 
-    T mSlots[2];
+    T mSlots[2]{};
 
 public:
-    AtomicMailbox() = default;
+    constexpr AtomicMailbox() noexcept = default;
 
     /**
      * @brief Locks the mailbox for reading.

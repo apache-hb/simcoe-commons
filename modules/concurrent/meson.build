@@ -8,8 +8,10 @@ libsimcoe_concurrent = library(
   'simcoe-concurrent',
   src,
   include_directories: inc,
+  cpp_args: ['-DSM_CONCURRENT_API_EXPORT=1'],
   version: meson.project_version(),
   install: true,
+  gnu_symbol_visibility: 'hidden',
 )
 
 simcoe_concurrent_dep = declare_dependency(

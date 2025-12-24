@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include <simcoe/concurrent/exports.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -48,7 +50,7 @@ public:
      *
      * @param interval The minimum interval between activations
      */
-    constexpr AtMostEvery(std::chrono::nanoseconds interval)
+    constexpr AtMostEvery(std::chrono::nanoseconds interval) noexcept
         : mLastActive(0)
         , mInterval(interval) {}
 
@@ -59,7 +61,7 @@ public:
      * @retval true if the flag was activated
      * @retval false if the flag was not activated
      */
-    bool isActive() noexcept [[SM_CLANG_NONBLOCKING]];
+    SM_CONCURRENT_API bool isActive() noexcept [[SM_CLANG_NONBLOCKING]];
 };
 
 #if __cpp_concepts >= 201907L
