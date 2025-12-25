@@ -29,6 +29,7 @@ install_headers(
   'include/simcoe/concurrent/annotations.hpp',
   'include/simcoe/concurrent/mailbox.hpp',
   'include/simcoe/concurrent/limiting_flag.hpp',
+  'include/simcoe/concurrent/ring_buffer.hpp',
   subdir: 'simcoe/concurrent',
 )
 
@@ -39,6 +40,9 @@ if gtest_main.found()
     },
     'limiting flag': {
       'sources': files('test/limiting_flag_test.cpp'),
+    },
+    'ring buffer': {
+      'sources': files('test/ring_buffer_test.cpp'),
     },
   }
 

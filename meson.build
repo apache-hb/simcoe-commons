@@ -38,6 +38,7 @@ if doxygen.found()
       'OUTPUT_DIRECTORY': meson.current_build_dir() / 'docs',
       'INPUT': meson.project_source_root() / 'modules',
       'CLANG_DATABASE_PATH': meson.global_build_root() / 'compile_commands.json',
+      'CITE_BIB_FILES': meson.project_source_root() / 'resources' / 'cite.bib',
     },
   )
 
