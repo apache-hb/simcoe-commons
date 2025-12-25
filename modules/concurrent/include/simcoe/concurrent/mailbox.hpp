@@ -62,12 +62,12 @@ public:
      *
      * @note This function is a no-op and exists to allow usage with std::lock_guard.
      */
-    void lock() noexcept [[SM_CLANG_NONBLOCKING]] {}
+    void lock() noexcept SM_CLANG_NONBLOCKING {}
 
     /**
      * @brief Unlocks the mailbox after reading.
      */
-    void unlock() noexcept [[SM_CLANG_NONBLOCKING]] {
+    void unlock() noexcept SM_CLANG_NONBLOCKING {
         mState.fetch_xor(kWriteBit, std::memory_order_release);
     }
 
@@ -77,7 +77,7 @@ public:
      *
      * @return The most recent data.
      */
-    const T& read() const noexcept [[SM_CLANG_NONBLOCKING]] {
+    const T& read() const noexcept SM_CLANG_NONBLOCKING {
         std::size_t index = !(mState.load(std::memory_order_acquire) & kIndexBit);
         return mSlots[index];
     }
@@ -87,7 +87,7 @@ public:
      *
      * @param data The data to write.
      */
-    void write(T data) [[SM_CLANG_BLOCKING]] {
+    void write(T data) SM_CLANG_BLOCKING {
         int state = 0;
         while ((state = mState.load(std::memory_order_acquire)) & kWriteBit) {
             /* spin */

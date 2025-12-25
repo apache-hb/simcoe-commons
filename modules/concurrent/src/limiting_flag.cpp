@@ -12,17 +12,17 @@ constexpr uint64_t kPrecision = 100; // 100ns units
  * @param interval The time interval
  * @return uint64_t Time in 100ns units
  */
-uint64_t timeInInterval(std::chrono::nanoseconds interval) noexcept [[SM_CLANG_NONBLOCKING]] {
+uint64_t timeInInterval(std::chrono::nanoseconds interval) noexcept SM_CLANG_NONBLOCKING {
     return static_cast<uint64_t>(interval.count() / kPrecision);
 }
 
-std::chrono::nanoseconds currentTime() noexcept [[SM_CLANG_NONBLOCKING]] {
+std::chrono::nanoseconds currentTime() noexcept SM_CLANG_NONBLOCKING {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now().time_since_epoch());
 }
 
 } // namespace
 
-bool sm::concurrent::AtMostEvery::isActive() noexcept [[SM_CLANG_NONBLOCKING]] {
+bool sm::concurrent::AtMostEvery::isActive() noexcept SM_CLANG_NONBLOCKING {
     auto now = currentTime();
 
     uint64_t current = timeInInterval(now);

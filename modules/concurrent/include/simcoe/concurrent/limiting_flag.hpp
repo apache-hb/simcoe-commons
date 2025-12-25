@@ -60,7 +60,7 @@ public:
      * @retval true if the flag was activated
      * @retval false if the flag was not activated
      */
-    SM_CONCURRENT_API bool isActive() noexcept [[SM_CLANG_NONBLOCKING]];
+    SM_CONCURRENT_API bool isActive() noexcept SM_CLANG_NONBLOCKING;
 };
 
 #if __cpp_concepts >= 201907L
