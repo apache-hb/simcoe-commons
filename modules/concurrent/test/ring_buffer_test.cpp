@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <bitset>
 #include <latch>
 #include <thread>
 
@@ -17,6 +18,31 @@
 #    pragma clang diagnostic pop
 #endif
 
+template <typename T>
+class TestAllocator {
+    std::allocator<T> mInnerAllocator;
+
+public:
+    bool shouldAllocate = true;
+
+    TestAllocator() = default;
+
+    T* allocate(std::size_t n) noexcept {
+        if (shouldAllocate) {
+            return mInnerAllocator.allocate(n);
+        }
+
+        return nullptr;
+    }
+
+    void deallocate(T* ptr, std::size_t n) noexcept {
+        mInnerAllocator.deallocate(ptr, n);
+    }
+};
+
+template <typename T>
+using TestRingBuffer = sm::concurrent::RingBuffer<T, TestAllocator<T>>;
+
 class RingBufferConstructTest : public testing::Test {};
 
 TEST_F(RingBufferConstructTest, Construct) {
@@ -31,14 +57,21 @@ TEST_F(RingBufferConstructTest, ConstructString) {
     ASSERT_EQ(queue.count(), 0);
 }
 
+TEST_F(RingBufferConstructTest, ConstructFail) {
+    TestAllocator<int> allocator;
+    allocator.shouldAllocate = false;
+    auto result = TestRingBuffer<int>::create(1024, allocator);
+    ASSERT_EQ(result.has_value(), false);
+}
+
 class RingBufferTest : public testing::Test {
 public:
     sm::concurrent::RingBuffer<std::string> queue;
-    static constexpr size_t kCapacity = 1024;
+    static constexpr size_t kCapacity = 64;
 
     void SetUp() override {
-        queue = sm::concurrent::RingBuffer<std::string>::create(1024).value();
-        ASSERT_EQ(queue.capacity(), 1024);
+        queue = sm::concurrent::RingBuffer<std::string>::create(kCapacity).value();
+        ASSERT_EQ(queue.capacity(), kCapacity);
         ASSERT_EQ(queue.count(), 0);
     }
 };
@@ -78,23 +111,51 @@ TEST_F(RingBufferTest, PopEmpty) {
     ASSERT_EQ(queue.count(), 0);
 }
 
-TEST_F(RingBufferTest, ThreadSafe) {
-    constexpr size_t kProducerCount = 8;
+struct Entry {
+    size_t tid;
+    size_t index;
+};
+
+class RingBufferThreadTest : public testing::Test {
+public:
+    using RingBuffer = TestRingBuffer<Entry>;
+    RingBuffer queue;
+    static constexpr size_t kCapacity = 64;
+    static constexpr size_t kProducerCount = 8;
+    static constexpr size_t kIterations = 1000;
+
+    void SetUp() override {
+        queue = RingBuffer::create(kCapacity).value();
+        ASSERT_EQ(queue.capacity(), kCapacity);
+        ASSERT_EQ(queue.count(), 0);
+    }
+
+    std::bitset<kIterations * kProducerCount> sent{};
+    std::bitset<kIterations * kProducerCount> received{};
+};
+
+TEST_F(RingBufferThreadTest, ThreadSafe) {
     std::vector<std::jthread> producers;
-    std::latch latch(kProducerCount + 1);
+    std::latch latch{kProducerCount + 1};
 
     std::atomic<size_t> producedCount = 0;
     std::atomic<size_t> consumedCount = 0;
     std::atomic<size_t> droppedCount = 0;
 
+    std::atomic<int> currentSize = 0;
+
     for (size_t i = 0; i < kProducerCount; ++i) {
-        producers.emplace_back([&] {
+        producers.emplace_back([&, tid = i] {
             latch.arrive_and_wait();
 
-            for (size_t j = 0; j < 1000; ++j) {
-                std::string value = "Hello, World!";
+            for (size_t j = 0; j < kIterations; ++j) {
+                Entry value{tid, j};
                 if (queue.tryPush(value)) {
+                    sent.set(tid * kIterations + j);
+
                     producedCount += 1;
+                    // !race here with the consumer decrementing, meaning we can't test this value
+                    currentSize += 1;
                 } else {
                     droppedCount += 1;
                 }
@@ -102,32 +163,55 @@ TEST_F(RingBufferTest, ThreadSafe) {
         });
     }
 
-    std::jthread consumer([&](std::stop_token stop) {
-        latch.arrive_and_wait();
+    {
+        std::jthread consumer([&](std::stop_token stop) {
+            latch.arrive_and_wait();
 
-        std::string value;
-        while (!stop.stop_requested()) {
-            if (queue.tryPop(value)) {
-                consumedCount += 1;
+            while (!stop.stop_requested()) {
+                Entry value{};
+                if (queue.tryPop(value)) {
+                    received.set(value.tid * kIterations + value.index);
+                    consumedCount += 1;
+                    // I'd love to test to ensure currentSize never goes negative here
+                    // but that would race with the producers incrementing it
+                    // the race is marked with !race in the line above
+                    currentSize -= 1;
+                }
             }
-        }
-    });
+        });
 
-    producers.clear();
-    consumer.request_stop();
-    consumer.join();
-
-    std::string value;
-    while (queue.tryPop(value)) {
-        consumedCount += 1;
+        producers.clear();
     }
 
-    ASSERT_NE(producedCount.load(), 0);
-    ASSERT_EQ(consumedCount.load(), producedCount.load());
+    Entry value;
+    while (queue.tryPop(value)) {
+        received.set(value.tid * kIterations + value.index);
+        consumedCount += 1;
+        currentSize -= 1;
+    }
+
+    if (received != sent) {
+        int limit = 10;
+        for (size_t i = 0; i < kIterations * kProducerCount; ++i) {
+            if (sent.test(i) && !received.test(i)) {
+                size_t tid = i / kIterations;
+                size_t index = i % kIterations;
+                ADD_FAILURE() << "Missing entry from tid " << tid << " index " << index;
+
+                if (--limit == 0) {
+                    break;
+                }
+            }
+        }
+    }
+
+    ASSERT_NE(producedCount.load(), 0) << "No items were produced";
+    ASSERT_EQ(consumedCount.load(), producedCount.load()) << "Produced items were lost";
+    ASSERT_EQ(currentSize.load(), 0) << "Final queue size is not zero";
 }
 
 TEST(RingBufferOrderTest, Order) {
-    sm::concurrent::RingBuffer<size_t> queue = sm::concurrent::RingBuffer<size_t>::create(64).value();
+    TestRingBuffer<size_t> queue = TestRingBuffer<size_t>::create(64).value();
 
     for (size_t i = 0; i < 64; i++) {
         size_t value = i * 10;

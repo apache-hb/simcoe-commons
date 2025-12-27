@@ -5,6 +5,8 @@
 #include <atomic>
 #include <cassert>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <simcoe/concurrent/annotations.hpp>
@@ -12,7 +14,7 @@
 
 namespace sm::concurrent {
 /**
- * @brief A fixed size, multi-producer, single-consumer reentrant atomic ringbuffer.
+ * @brief A fixed size, multi-producer, single-consumer atomic ringbuffer.
  * @cite FreeBSDRingBuffer FreeBSD
  */
 template <typename T, typename Allocator = std::allocator<T>>
@@ -20,39 +22,127 @@ template <typename T, typename Allocator = std::allocator<T>>
     requires std::is_nothrow_move_constructible_v<T> && std::is_nothrow_move_assignable_v<T> && std::is_nothrow_destructible_v<T> && std::is_nothrow_default_constructible_v<Allocator>
 #endif
 class RingBuffer {
+public:
+    using size_type = uint32_t;
+    using difference_type = int32_t;
+    using value_type = T;
+    using allocator_type = Allocator;
+
+public:
     Allocator mAllocator{};
 
     // The storage for the ring buffer, only the range of [mConsumerHead, mProducerHead) is valid initialized, all other slots are uninitialized.
     T* mStorage{nullptr};
 
     // The capacity of the ring buffer + 1.
-    uint32_t mCapacity{0};
+    size_type mCapacity{0};
 
-    std::atomic<uint32_t> mProducerHead{0};
-    std::atomic<uint32_t> mConsumerTail{0};
-    std::atomic<uint32_t> mProducerTail{0};
-    std::atomic<uint32_t> mConsumerHead{0};
+    std::atomic<difference_type> mFreeSize{0};
+    std::atomic<difference_type> mUsedSize{0};
+
+    std::atomic<size_type> mProducerHead{0};
+    std::atomic<size_type> mProducerTail{0};
+
+    std::atomic<size_type> mConsumerHead{0};
+    std::atomic<size_type> mConsumerTail{0};
 
     void clear() noexcept {
         if (mStorage) {
             //
             // Destroy the remaining elements in the buffer
             //
-            std::destroy(mStorage + mConsumerHead, mStorage + mProducerHead);
+            size_type front = mConsumerTail.load();
+            size_type back = mProducerHead.load();
+            for (size_type i = front; i != back; i = incrementIndex(i)) {
+                std::destroy_at(&mStorage[i]);
+            }
+
             mAllocator.deallocate(mStorage, mCapacity);
             mStorage = nullptr;
             mCapacity = 0;
         }
     }
 
-    constexpr RingBuffer(T* storage, uint32_t capacity, Allocator allocator) noexcept
+    T& getElement(size_type index) noexcept SM_CLANG_NONBLOCKING {
+        assert(index < mCapacity);
+        return mStorage[index];
+    }
+
+    size_type incrementIndex(size_type index) noexcept SM_CLANG_NONBLOCKING {
+        return (index + 1) % mCapacity;
+    }
+
+    size_type acquireWriteBlock() {
+        while (true) {
+            auto oldProducerHead = mProducerHead.load(std::memory_order_acquire);
+
+            auto free = mFreeSize.load();
+            if (free < 1) {
+                return (std::numeric_limits<size_type>::max)();
+            }
+
+            mFreeSize.fetch_sub(1);
+
+            auto newProducerHead = incrementIndex(oldProducerHead);
+            if (mProducerHead.compare_exchange_strong(oldProducerHead, newProducerHead)) {
+                return oldProducerHead;
+            }
+
+            mFreeSize.fetch_add(1);
+        }
+    }
+
+    void releaseWriteBlock(size_type index) {
+        auto next = incrementIndex(index);
+
+        size_type expected;
+        do {
+            expected = index;
+        } while (!mProducerTail.compare_exchange_strong(expected, next));
+
+        mUsedSize.fetch_add(1);
+    }
+
+    size_type acquireReadBlock() {
+        while (true) {
+            auto used = mUsedSize.load(std::memory_order_acquire);
+            if (used < 1) {
+                return (std::numeric_limits<size_type>::max)();
+            }
+
+            mUsedSize.fetch_sub(1);
+
+            auto oldConsumerHead = mConsumerTail.load(std::memory_order_acquire);
+            auto newConsumerHead = incrementIndex(oldConsumerHead);
+            if (mConsumerTail.compare_exchange_strong(oldConsumerHead, newConsumerHead, std::memory_order_acq_rel)) {
+                return oldConsumerHead;
+            }
+
+            mUsedSize.fetch_add(1);
+        }
+    }
+
+    void releaseReadBlock(size_type index) {
+        auto next = incrementIndex(index);
+        size_type expected;
+
+        do {
+            expected = index;
+        } while (mConsumerHead.compare_exchange_strong(expected, next));
+
+        mFreeSize.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    constexpr RingBuffer(T* storage, size_type capacity, Allocator allocator) noexcept
         : mAllocator(std::move(allocator))
         , mStorage(storage)
         , mCapacity(capacity + 1)
+        , mFreeSize(capacity)
+        , mUsedSize(0)
         , mProducerHead(0)
-        , mConsumerTail(0)
         , mProducerTail(0)
-        , mConsumerHead(0) {}
+        , mConsumerHead(0)
+        , mConsumerTail(0) {}
 
 public:
     constexpr RingBuffer() noexcept = default;
@@ -71,10 +161,12 @@ public:
         : mAllocator(std::move(other.mAllocator))
         , mStorage(other.mStorage)
         , mCapacity(other.mCapacity)
+        , mFreeSize(other.mFreeSize.load())
+        , mUsedSize(other.mUsedSize.load())
         , mProducerHead(other.mProducerHead.load())
-        , mConsumerTail(other.mConsumerTail.load())
         , mProducerTail(other.mProducerTail.load())
-        , mConsumerHead(other.mConsumerHead.load()) {
+        , mConsumerHead(other.mConsumerHead.load())
+        , mConsumerTail(other.mConsumerTail.load()) {
         other.mStorage = nullptr;
         other.mCapacity = 0;
     }
@@ -94,10 +186,12 @@ public:
             mAllocator = std::move(other.mAllocator);
             mStorage = other.mStorage;
             mCapacity = other.mCapacity;
+            mUsedSize.store(other.mUsedSize.load());
+            mFreeSize.store(other.mFreeSize.load());
             mProducerHead.store(other.mProducerHead.load());
-            mConsumerTail.store(other.mConsumerTail.load());
-            mProducerTail.store(other.mProducerTail.load());
             mConsumerHead.store(other.mConsumerHead.load());
+            mProducerTail.store(other.mProducerTail.load());
+            mConsumerTail.store(other.mConsumerTail.load());
 
             other.mStorage = nullptr;
             other.mCapacity = 0;
@@ -108,7 +202,7 @@ public:
     /**
      * @brief Destroy the ring buffer.
      */
-    constexpr ~RingBuffer() noexcept {
+    ~RingBuffer() noexcept {
         clear();
     }
 
@@ -122,37 +216,17 @@ public:
      *
      * @return true if the value was pushed, false if the queue was full.
      */
+    [[nodiscard]]
     bool tryPush(T& value) noexcept SM_CLANG_NONBLOCKING {
-        uint32_t producerHead;
-        uint32_t producerTail;
-        uint32_t producerTailNext;
-        uint32_t producerNext;
-        uint32_t consumerTail;
+        auto index = acquireWriteBlock();
+        if (index == (std::numeric_limits<size_type>::max)()) {
+            return false;
+        }
 
-        do {
-            producerHead = mProducerHead.load();
-            consumerTail = mConsumerTail.load();
-
-            producerNext = (producerHead + 1) % mCapacity;
-            if (producerNext == consumerTail) {
-                return false; // Queue is full
-            }
-        } while (!mProducerHead.compare_exchange_strong(producerHead, producerNext));
-
-        T& storage = mStorage[producerHead];
+        auto& storage = getElement(index);
         std::construct_at(&storage, std::move(value));
 
-        //
-        // Advance the producer tail to the next position, this is implemented differently from what the
-        // freebsd ring buffer does because that implementation is not reentrant. This avoids the
-        // deadlock that would occur if a producer is interrupted here and then the interrupt service routine
-        // also tries to push to the same ring buffer.
-        //
-        do {
-            producerTail = mProducerTail.load();
-            producerTailNext = (producerTail + 1) % mCapacity;
-        } while (!mProducerTail.compare_exchange_strong(producerTail, producerTailNext));
-
+        releaseWriteBlock(index);
         return true;
     }
 
@@ -166,22 +240,17 @@ public:
      *
      * @return true if a value was popped, false if the queue was empty.
      */
+    [[nodiscard]]
     bool tryPop(T& value) noexcept SM_CLANG_NONBLOCKING {
-        uint32_t consumerHead = mConsumerHead.load();
-        uint32_t producerTail = mProducerTail.load();
-
-        uint32_t consumerNext = (consumerHead + 1) % mCapacity;
-
-        if (consumerHead == producerTail) {
-            return false; // Queue is empty
+        auto index = acquireReadBlock();
+        if (index == (std::numeric_limits<size_type>::max)()) {
+            return false;
         }
 
-        mConsumerHead.store(consumerNext);
+        T& element = getElement(index);
+        value = std::move(element);
 
-        value = std::move(mStorage[consumerHead]);
-        std::destroy_at(&mStorage[consumerHead]);
-
-        mConsumerTail.store(consumerNext);
+        releaseReadBlock(index);
         return true;
     }
 
@@ -192,9 +261,9 @@ public:
      *
      * @return The number of items in the queue.
      */
-    uint32_t count() const noexcept SM_CLANG_NONBLOCKING {
-        uint32_t producerTail = mProducerTail.load();
-        uint32_t consumerTail = mConsumerTail.load();
+    size_type count() const noexcept SM_CLANG_NONBLOCKING {
+        size_type producerTail = mProducerTail.load();
+        size_type consumerTail = mConsumerHead.load();
         return (mCapacity + producerTail - consumerTail) % mCapacity;
     }
 
@@ -203,17 +272,28 @@ public:
      *
      * @return The maximum number of items the queue can hold.
      */
-    uint32_t capacity() const noexcept SM_CLANG_NONBLOCKING {
+    size_type capacity() const noexcept SM_CLANG_NONBLOCKING {
         return mCapacity - 1;
     }
 
     /**
-     * @brief Check if the queue has been setup.
+     * @brief Get the Allocator object used by the ring buffer.
      *
-     * @return true if the queue has been setup, false otherwise.
+     * @return The allocator.
      */
-    bool isSetup() const noexcept SM_CLANG_NONBLOCKING {
-        return mStorage != nullptr;
+    allocator_type getAllocator() const noexcept {
+        return mAllocator;
+    }
+
+    /**
+     * @brief Provided for compatibility with standard containers.
+     *
+     * This is equivalent to `getAllocator()`.
+     *
+     * @return The allocator.
+     */
+    allocator_type get_allocator() const noexcept {
+        return mAllocator;
     }
 
     /**
@@ -230,16 +310,18 @@ public:
      * @param capacity The maximum number of elements the queue can hold.
      * @param allocator The allocator used to allocate and deallocate the storage.
      */
-    void reset(T* storage, uint32_t capacity, Allocator allocator) noexcept {
+    void reset(T* storage, size_type capacity, Allocator allocator) noexcept {
         clear();
 
         mAllocator = std::move(allocator);
         mStorage = storage;
         mCapacity = capacity + 1;
+        mFreeSize.store(capacity);
+        mUsedSize.store(0);
         mProducerHead.store(0);
         mProducerTail.store(0);
-        mConsumerHead.store(0);
         mConsumerTail.store(0);
+        mConsumerHead.store(0);
     }
 
     /**
@@ -256,8 +338,7 @@ public:
      * @return The construction result.
      * @retval std::nullopt The queue could not be created.
      */
-    [[nodiscard]]
-    static std::optional<RingBuffer<T>> create(uint32_t capacity, Allocator allocator = Allocator{}) noexcept {
+    static std::optional<RingBuffer<T, Allocator>> create(size_type capacity, Allocator allocator = Allocator{}) noexcept {
         assert(capacity > 0);
 
         T* storage = allocator.allocate(capacity + 1);
