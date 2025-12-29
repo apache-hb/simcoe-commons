@@ -39,7 +39,7 @@ public:
     using value_type = T;
     using allocator_type = Allocator;
 
-public:
+private:
     struct alignas(alignof(T)) Storage {
         std::byte data[sizeof(T)];
     };
