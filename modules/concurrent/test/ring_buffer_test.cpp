@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include <bitset>
+#include <algorithm>
 #include <latch>
 #include <thread>
 
@@ -22,10 +22,19 @@ template <typename T>
 class TestAllocator {
     std::allocator<T> mInnerAllocator;
 
+    template <typename U>
+    friend class TestAllocator;
+
 public:
     bool shouldAllocate = true;
+    using value_type = T;
 
     TestAllocator() = default;
+
+    template <typename U>
+    TestAllocator(const TestAllocator<U>& other) noexcept
+        : mInnerAllocator(other.mInnerAllocator)
+        , shouldAllocate(other.shouldAllocate) {}
 
     T* allocate(std::size_t n) noexcept {
         if (shouldAllocate) {
@@ -64,25 +73,73 @@ TEST_F(RingBufferConstructTest, ConstructFail) {
     ASSERT_EQ(result.has_value(), false);
 }
 
-class RingBufferTest : public testing::Test {
+class RingBufferDetailsTest : public testing::TestWithParam<size_t> {
 public:
-    sm::concurrent::RingBuffer<std::string> queue;
-    static constexpr size_t kCapacity = 64;
+    std::unique_ptr<std::atomic<uint64_t>[]> bitset;
 
     void SetUp() override {
-        queue = sm::concurrent::RingBuffer<std::string>::create(kCapacity).value();
-        ASSERT_EQ(queue.capacity(), kCapacity);
-        ASSERT_EQ(queue.count(), 0);
+        size_t size = getSize();
+        bitset = std::make_unique<std::atomic<uint64_t>[]>(size);
+        std::uninitialized_fill_n(bitset.get(), size, 0);
+    }
+
+    size_t getSize() const {
+        return sm::concurrent::detail::requiredBitsetSize(getCapacity());
+    }
+
+    size_t getCapacity() const {
+        return GetParam();
     }
 };
 
-TEST_F(RingBufferTest, Push) {
+TEST_P(RingBufferDetailsTest, AtomicScanAndSet) {
+    std::vector<bool> allocated;
+    allocated.resize(getCapacity(), false);
+
+    for (size_t i = 0; i < getCapacity(); i++) {
+        size_t index = sm::concurrent::detail::atomicScanAndSet(bitset.get(), getCapacity());
+
+        // we don't care *which* index we get, just that we get a valid one
+        ASSERT_NE(index, (std::numeric_limits<size_t>::max)()) << "Failed to allocate at iteration " << i;
+
+        ASSERT_FALSE(allocated[index]) << "Allocated index " << index << " twice";
+        allocated[index] = true;
+    }
+
+    // now the bitset should be full
+    size_t index = sm::concurrent::detail::atomicScanAndSet(bitset.get(), getCapacity());
+    ASSERT_EQ(index, (std::numeric_limits<size_t>::max)()) << "Allocated index when full";
+}
+
+INSTANTIATE_TEST_SUITE_P(RingBufferDetailsTests, RingBufferDetailsTest, testing::Values(1, 2, 4, 8, 16, 32, 64, 65, 128, 256, 512, 1024));
+
+class RingBufferSizedTest : public testing::TestWithParam<size_t> {
+public:
+    sm::concurrent::RingBuffer<std::string> queue;
+
+    static void SetUpTestSuite() {
+        setbuf(stdout, nullptr);
+        setbuf(stderr, nullptr);
+    }
+
+    void SetUp() override {
+        size_t capacity = GetParam();
+        auto result = sm::concurrent::RingBuffer<std::string>::create(capacity);
+        ASSERT_TRUE(result.has_value()) << "Failed to create ring buffer with capacity " << capacity;
+        queue = std::move(result.value());
+
+        ASSERT_EQ(queue.capacity(), capacity) << "Ring buffer capacity mismatch";
+        ASSERT_EQ(queue.count(), 0) << "Ring buffer initial count is not zero";
+    }
+};
+
+TEST_P(RingBufferSizedTest, Push) {
     std::string value = "Hello, World!";
     ASSERT_TRUE(queue.tryPush(value));
     ASSERT_EQ(queue.count(), 1);
 }
 
-TEST_F(RingBufferTest, Pop) {
+TEST_P(RingBufferSizedTest, Pop) {
     std::string data = "Hello, World!";
     std::string value = data;
     ASSERT_TRUE(queue.tryPush(value));
@@ -94,44 +151,108 @@ TEST_F(RingBufferTest, Pop) {
     ASSERT_EQ(queue.count(), 0);
 }
 
-TEST_F(RingBufferTest, PushFull) {
-    for (size_t i = 0; i < kCapacity; ++i) {
+TEST_P(RingBufferSizedTest, PushFull) {
+    for (size_t i = 0; i < queue.capacity(); ++i) {
         std::string value = "Hello, World!";
-        ASSERT_TRUE(queue.tryPush(value));
+        ASSERT_TRUE(queue.tryPush(value)) << "Failed to push at index " << i;
     }
-    ASSERT_EQ(queue.count(), kCapacity);
+    ASSERT_EQ(queue.count(), queue.capacity());
 
     std::string value = "This should not be pushed";
     ASSERT_FALSE(queue.tryPush(value));
 }
 
-TEST_F(RingBufferTest, PopEmpty) {
+TEST_P(RingBufferSizedTest, PushInOrder) {
+    for (size_t i = 0; i < queue.capacity(); i++) {
+        std::string value = "Hello, World! " + std::to_string(i);
+        ASSERT_TRUE(queue.tryPush(value)) << "Failed to push at index " << i;
+    }
+    ASSERT_EQ(queue.count(), queue.capacity());
+
+    for (size_t i = 0; i < queue.capacity(); i++) {
+        std::string expected = "Hello, World! " + std::to_string(i);
+        std::string value;
+        ASSERT_TRUE(queue.tryPop(value));
+        ASSERT_EQ(expected, value) << "Unexpected value at index " << i;
+    }
+
+    ASSERT_EQ(queue.count(), 0);
+
+    std::string value;
+    ASSERT_FALSE(queue.tryPop(value));
+}
+
+TEST_P(RingBufferSizedTest, PopEmpty) {
     std::string value;
     ASSERT_FALSE(queue.tryPop(value));
     ASSERT_EQ(queue.count(), 0);
 }
 
-struct Entry {
-    size_t tid;
-    size_t index;
+INSTANTIATE_TEST_SUITE_P(RingBufferTests, RingBufferSizedTest, testing::Values(1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024));
+
+template <typename T, size_t N>
+struct MessageValues {
+    static constexpr size_t kMaxValues = N;
+
+    std::array<T, kMaxValues> consumed{};
+    std::atomic<size_t> consumedIndex{0};
+
+    std::array<T, kMaxValues> produced{};
+    std::atomic<size_t> producedIndex{0};
+
+    void recordConsumed(T value) {
+        size_t index = consumedIndex.fetch_add(1);
+        if (index < kMaxValues) {
+            consumed[index] = value;
+        }
+    }
+
+    void recordProduced(T value) {
+        size_t index = producedIndex.fetch_add(1);
+        if (index < kMaxValues) {
+            produced[index] = value;
+        }
+    }
+
+    void assertEqual() {
+        ASSERT_EQ(producedIndex.load(), consumedIndex.load());
+
+        std::sort(consumed.begin(), consumed.begin() + consumedIndex.load());
+        std::sort(produced.begin(), produced.begin() + producedIndex.load());
+
+        for (size_t i = 0; i < consumedIndex.load(); i++) {
+            ASSERT_EQ(consumed[i], produced[i]) << "Mismatch at index " << i << " (" << producedIndex.load() << "/" << consumedIndex.load() << ")";
+        }
+    }
 };
 
 class RingBufferThreadTest : public testing::Test {
 public:
-    using RingBuffer = TestRingBuffer<Entry>;
-    RingBuffer queue;
-    static constexpr size_t kCapacity = 64;
+    using Element = size_t;
+    using TestQueue = sm::concurrent::RingBuffer<Element>;
+
+    TestQueue queue;
+    static constexpr size_t kCapacity = 1024;
     static constexpr size_t kProducerCount = 8;
-    static constexpr size_t kIterations = 1000;
+
+    MessageValues<Element, 0x1000 * 4> messageValues;
+    std::atomic<Element> nextValue{1};
 
     void SetUp() override {
-        queue = RingBuffer::create(kCapacity).value();
-        ASSERT_EQ(queue.capacity(), kCapacity);
+        auto result = TestQueue::create(kCapacity);
+        ASSERT_TRUE(result.has_value());
+        queue = std::move(result.value());
+        ASSERT_EQ(queue.capacity(), 1024);
         ASSERT_EQ(queue.count(), 0);
     }
 
-    std::bitset<kIterations * kProducerCount> sent{};
-    std::bitset<kIterations * kProducerCount> received{};
+    void recordConsumed(Element value) {
+        messageValues.recordConsumed(value);
+    }
+
+    void recordProduced(Element value) {
+        messageValues.recordProduced(value);
+    }
 };
 
 TEST_F(RingBufferThreadTest, ThreadSafe) {
@@ -142,20 +263,15 @@ TEST_F(RingBufferThreadTest, ThreadSafe) {
     std::atomic<size_t> consumedCount = 0;
     std::atomic<size_t> droppedCount = 0;
 
-    std::atomic<int> currentSize = 0;
-
     for (size_t i = 0; i < kProducerCount; ++i) {
-        producers.emplace_back([&, tid = i] {
+        producers.emplace_back([&] {
             latch.arrive_and_wait();
 
-            for (size_t j = 0; j < kIterations; ++j) {
-                Entry value{tid, j};
+            for (size_t j = 0; j < 1000; ++j) {
+                Element value = nextValue.fetch_add(1);
                 if (queue.tryPush(value)) {
-                    sent.set(tid * kIterations + j);
-
                     producedCount += 1;
-                    // !race here with the consumer decrementing, meaning we can't test this value
-                    currentSize += 1;
+                    recordProduced(value);
                 } else {
                     droppedCount += 1;
                 }
@@ -167,15 +283,11 @@ TEST_F(RingBufferThreadTest, ThreadSafe) {
         std::jthread consumer([&](std::stop_token stop) {
             latch.arrive_and_wait();
 
+            Element value{std::numeric_limits<Element>::max()};
             while (!stop.stop_requested()) {
-                Entry value{};
                 if (queue.tryPop(value)) {
-                    received.set(value.tid * kIterations + value.index);
                     consumedCount += 1;
-                    // I'd love to test to ensure currentSize never goes negative here
-                    // but that would race with the producers incrementing it
-                    // the race is marked with !race in the line above
-                    currentSize -= 1;
+                    recordConsumed(value);
                 }
             }
         });
@@ -183,31 +295,26 @@ TEST_F(RingBufferThreadTest, ThreadSafe) {
         producers.clear();
     }
 
-    Entry value;
+    Element value{std::numeric_limits<Element>::max()};
     while (queue.tryPop(value)) {
-        received.set(value.tid * kIterations + value.index);
         consumedCount += 1;
-        currentSize -= 1;
+        recordConsumed(value);
     }
 
-    if (received != sent) {
-        int limit = 10;
-        for (size_t i = 0; i < kIterations * kProducerCount; ++i) {
-            if (sent.test(i) && !received.test(i)) {
-                size_t tid = i / kIterations;
-                size_t index = i % kIterations;
-                ADD_FAILURE() << "Missing entry from tid " << tid << " index " << index;
-
-                if (--limit == 0) {
-                    break;
-                }
-            }
-        }
+    {
+        auto it = std::find(messageValues.produced.begin(), messageValues.produced.end(), std::numeric_limits<Element>::max());
+        ASSERT_EQ(it, messageValues.produced.end()) << "Produced sentinel value found in produced messages at " << std::distance(messageValues.produced.begin(), it);
     }
 
-    ASSERT_NE(producedCount.load(), 0) << "No items were produced";
-    ASSERT_EQ(consumedCount.load(), producedCount.load()) << "Produced items were lost";
-    ASSERT_EQ(currentSize.load(), 0) << "Final queue size is not zero";
+    {
+        auto it = std::find(messageValues.consumed.begin(), messageValues.consumed.end(), std::numeric_limits<Element>::max());
+        ASSERT_EQ(it, messageValues.consumed.end()) << "Consumed sentinel value found in consumed messages at " << std::distance(messageValues.consumed.begin(), it);
+    }
+
+    messageValues.assertEqual();
+
+    ASSERT_NE(producedCount.load(), 0);
+    ASSERT_EQ(consumedCount.load(), producedCount.load());
 }
 
 TEST(RingBufferOrderTest, Order) {

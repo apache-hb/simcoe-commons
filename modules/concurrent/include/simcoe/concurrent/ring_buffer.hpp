@@ -10,12 +10,24 @@
 #include <memory>
 #include <optional>
 #include <simcoe/concurrent/annotations.hpp>
+#include <simcoe/concurrent/detail/ring_buffer_bitset_detail.hpp>
 #include <type_traits>
 
 namespace sm::concurrent {
 /**
- * @brief A fixed size, multi-producer, single-consumer atomic ringbuffer.
- * @cite FreeBSDRingBuffer FreeBSD
+ * @brief A fixed size, multi-producer single-consumer, wait free, reentrant atomic ringbuffer.
+ *
+ * This ring buffer is reentrant unlike existing implementations because it must be safe to produce elements when
+ * in an interrupt handler as well as in a normal execution context. This complicates its design as it is
+ * not possible to implement a reentrant ring buffer without the elements in the ringbuffer being atomic
+ * themselves. This means that this ring buffer also contains an atomic bitmap allocator to store its
+ * contents.
+ *
+ * @tparam T The type of elements stored in the ring buffer. Must be MoveAssignable and MoveConstructible.
+ * @tparam Allocator The allocator type used to allocate and deallocate memory for the ring buffer.
+ *
+ * @cite FreeBSDRingBuffer FreeBSD ring_buf implementation
+ * @cite WaitFreeMpScQueue waitfree-mpsc-queue
  */
 template <typename T, typename Allocator = std::allocator<T>>
 #if __cpp_concepts >= 201907L
@@ -24,125 +36,105 @@ template <typename T, typename Allocator = std::allocator<T>>
 class RingBuffer {
 public:
     using size_type = uint32_t;
-    using difference_type = int32_t;
     using value_type = T;
     using allocator_type = Allocator;
 
 public:
-    Allocator mAllocator{};
+    struct alignas(alignof(T)) Storage {
+        std::byte data[sizeof(T)];
+    };
 
-    // The storage for the ring buffer, only the range of [mConsumerHead, mProducerHead) is valid initialized, all other slots are uninitialized.
-    T* mStorage{nullptr};
+    using BitsetWord = detail::BitsetWord;
+    using ElementIndex = detail::ElementIndex;
+
+    using StorageAllocator = std::allocator_traits<Allocator>::template rebind_alloc<Storage>;
+
+    [[no_unique_address]] StorageAllocator mAllocator{};
+
+    std::byte* mStorage{};
 
     // The capacity of the ring buffer + 1.
-    size_type mCapacity{0};
+    size_type mCapacity{};
 
-    std::atomic<difference_type> mFreeSize{0};
-    std::atomic<difference_type> mUsedSize{0};
+    std::atomic<size_type> mCount{};
 
-    std::atomic<size_type> mProducerHead{0};
-    std::atomic<size_type> mProducerTail{0};
+    std::atomic<size_type> mHead{};
+    std::atomic<size_type> mTail{};
 
-    std::atomic<size_type> mConsumerHead{0};
-    std::atomic<size_type> mConsumerTail{0};
+    static constexpr size_t storageOffsetForBitset(size_type capacity) noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
+        size_t offset = sizeof(T) * (capacity + 1);
+        offset = detail::roundup(offset, alignof(BitsetWord));
+        return offset;
+    }
+
+    static constexpr size_t storageOffsetForElements(size_type capacity) noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
+        size_t offset = storageOffsetForBitset(capacity);
+        offset += sizeof(BitsetWord) * detail::requiredBitsetSize(capacity);
+        offset = detail::roundup(offset, alignof(ElementIndex));
+        return offset;
+    }
+
+    T* getStorageAddress() noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
+        return reinterpret_cast<T*>(mStorage);
+    }
+
+    std::atomic<uint64_t>* getBitsetAddress() noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
+        return reinterpret_cast<std::atomic<uint64_t>*>(mStorage + storageOffsetForBitset(capacity()));
+    }
+
+    std::atomic<size_type>* getElementAddress() noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
+        return reinterpret_cast<std::atomic<size_type>*>(mStorage + storageOffsetForElements(capacity()));
+    }
+
+    T& getElementAt(size_type index) noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
+        T* storage = getStorageAddress();
+        return storage[index];
+    }
 
     void clear() noexcept {
-        if (mStorage) {
+        if (auto storage = getStorageAddress()) {
             //
             // Destroy the remaining elements in the buffer
             //
-            size_type front = mConsumerTail.load();
-            size_type back = mProducerHead.load();
-            for (size_type i = front; i != back; i = incrementIndex(i)) {
-                std::destroy_at(&mStorage[i]);
+            constexpr size_t kBitsPerElement = std::numeric_limits<uint64_t>::digits;
+
+            auto bitset = getBitsetAddress();
+            for (size_t i = 0; i < (capacity() / kBitsPerElement); i++) {
+                uint64_t word = bitset[i].load();
+                for (size_t bit = 0; bit < kBitsPerElement; bit++) {
+                    size_t index = i * kBitsPerElement + bit;
+                    if (index >= capacity()) {
+                        break;
+                    }
+
+                    if (word & (uint64_t{1} << bit)) {
+                        std::destroy_at(&storage[index]);
+                    }
+                }
             }
 
-            mAllocator.deallocate(mStorage, mCapacity);
+            mAllocator.deallocate(reinterpret_cast<Storage*>(mStorage), detail::underlyingStorageElementCount<T>(capacity()));
+
             mStorage = nullptr;
             mCapacity = 0;
         }
     }
 
-    T& getElement(size_type index) noexcept SM_CLANG_NONBLOCKING {
-        assert(index < mCapacity);
-        return mStorage[index];
+    size_type normalize(size_type index) noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
+        return index % capacity();
     }
 
-    size_type incrementIndex(size_type index) noexcept SM_CLANG_NONBLOCKING {
-        return (index + 1) % mCapacity;
+    size_t allocateElement() noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
+        return detail::atomicScanAndSet(getBitsetAddress(), capacity());
     }
 
-    size_type acquireWriteBlock() {
-        while (true) {
-            auto oldProducerHead = mProducerHead.load(std::memory_order_acquire);
-
-            auto free = mFreeSize.load();
-            if (free < 1) {
-                return (std::numeric_limits<size_type>::max)();
-            }
-
-            mFreeSize.fetch_sub(1);
-
-            auto newProducerHead = incrementIndex(oldProducerHead);
-            if (mProducerHead.compare_exchange_strong(oldProducerHead, newProducerHead)) {
-                return oldProducerHead;
-            }
-
-            mFreeSize.fetch_add(1);
-        }
-    }
-
-    void releaseWriteBlock(size_type index) {
-        auto next = incrementIndex(index);
-
-        size_type expected;
-        do {
-            expected = index;
-        } while (!mProducerTail.compare_exchange_strong(expected, next));
-
-        mUsedSize.fetch_add(1);
-    }
-
-    size_type acquireReadBlock() {
-        while (true) {
-            auto used = mUsedSize.load(std::memory_order_acquire);
-            if (used < 1) {
-                return (std::numeric_limits<size_type>::max)();
-            }
-
-            mUsedSize.fetch_sub(1);
-
-            auto oldConsumerHead = mConsumerTail.load(std::memory_order_acquire);
-            auto newConsumerHead = incrementIndex(oldConsumerHead);
-            if (mConsumerTail.compare_exchange_strong(oldConsumerHead, newConsumerHead, std::memory_order_acq_rel)) {
-                return oldConsumerHead;
-            }
-
-            mUsedSize.fetch_add(1);
-        }
-    }
-
-    void releaseReadBlock(size_type index) {
-        auto next = incrementIndex(index);
-        size_type expected;
-
-        do {
-            expected = index;
-        } while (mConsumerHead.compare_exchange_strong(expected, next));
-
-        mFreeSize.fetch_add(1, std::memory_order_acq_rel);
-    }
-
-    constexpr RingBuffer(T* storage, size_type capacity, Allocator allocator) noexcept
+    constexpr RingBuffer(std::byte* storage, size_type capacity, Allocator allocator) noexcept
         : mAllocator(std::move(allocator))
         , mStorage(storage)
         , mCapacity(capacity + 1)
-        , mFreeSize(capacity)
-        , mUsedSize(0)
-        , mProducerHead(0)
-        , mProducerTail(0)
-        , mConsumerHead(0)
-        , mConsumerTail(0) {}
+        , mCount(0)
+        , mHead(0)
+        , mTail(0) {}
 
 public:
     constexpr RingBuffer() noexcept = default;
@@ -161,12 +153,9 @@ public:
         : mAllocator(std::move(other.mAllocator))
         , mStorage(other.mStorage)
         , mCapacity(other.mCapacity)
-        , mFreeSize(other.mFreeSize.load())
-        , mUsedSize(other.mUsedSize.load())
-        , mProducerHead(other.mProducerHead.load())
-        , mProducerTail(other.mProducerTail.load())
-        , mConsumerHead(other.mConsumerHead.load())
-        , mConsumerTail(other.mConsumerTail.load()) {
+        , mCount(other.mCount.load())
+        , mHead(other.mHead.load())
+        , mTail(other.mTail.load()) {
         other.mStorage = nullptr;
         other.mCapacity = 0;
     }
@@ -186,12 +175,10 @@ public:
             mAllocator = std::move(other.mAllocator);
             mStorage = other.mStorage;
             mCapacity = other.mCapacity;
-            mUsedSize.store(other.mUsedSize.load());
-            mFreeSize.store(other.mFreeSize.load());
-            mProducerHead.store(other.mProducerHead.load());
-            mConsumerHead.store(other.mConsumerHead.load());
-            mProducerTail.store(other.mProducerTail.load());
-            mConsumerTail.store(other.mConsumerTail.load());
+            mCount.store(other.mCount.load());
+            mCount.store(other.mCount.load());
+            mHead.store(other.mHead.load());
+            mTail.store(other.mTail.load());
 
             other.mStorage = nullptr;
             other.mCapacity = 0;
@@ -217,16 +204,28 @@ public:
      * @return true if the value was pushed, false if the queue was full.
      */
     [[nodiscard]]
-    bool tryPush(T& value) noexcept SM_CLANG_NONBLOCKING {
-        auto index = acquireWriteBlock();
-        if (index == (std::numeric_limits<size_type>::max)()) {
+    bool tryPush(T& value) noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
+        auto index = allocateElement();
+        if (index == (std::numeric_limits<size_t>::max)()) {
             return false;
         }
 
-        auto& storage = getElement(index);
-        std::construct_at(&storage, std::move(value));
+        //
+        // Optimistic increment of count, if we exceed capacity, roll back.
+        //
+        auto count = mCount.fetch_add(1);
+        if (count >= capacity()) {
+            mCount.fetch_sub(1);
+            detail::atomicClearBit(getBitsetAddress(), index);
+            return false;
+        }
 
-        releaseWriteBlock(index);
+        std::construct_at(&getElementAt(index), std::move(value));
+
+        auto head = mHead.fetch_add(1);
+        auto elements = getElementAddress();
+        elements[normalize(head)].store(index);
+
         return true;
     }
 
@@ -241,16 +240,24 @@ public:
      * @return true if a value was popped, false if the queue was empty.
      */
     [[nodiscard]]
-    bool tryPop(T& value) noexcept SM_CLANG_NONBLOCKING {
-        auto index = acquireReadBlock();
-        if (index == (std::numeric_limits<size_type>::max)()) {
+    bool tryPop(T& value) noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
+        auto elements = getElementAddress();
+        auto index = elements[normalize(mTail.load())].exchange(std::numeric_limits<size_type>::max());
+        if (index == std::numeric_limits<size_type>::max()) {
             return false;
         }
 
-        T& element = getElement(index);
-        value = std::move(element);
+        //
+        // Move the value out of storage before we mark the slot as free.
+        //
+        T& underlying = getElementAt(index);
+        value = std::move(underlying);
+        std::destroy_at(&underlying);
 
-        releaseReadBlock(index);
+        detail::atomicClearBit(getBitsetAddress(), index);
+
+        mTail.fetch_add(1);
+        mCount.fetch_sub(1);
         return true;
     }
 
@@ -259,12 +266,12 @@ public:
      *
      * @warning As this is a lock-free structure the count will be immediately out of date.
      *
+     * @param order The memory order to use when loading the count.
+     *
      * @return The number of items in the queue.
      */
-    size_type count() const noexcept SM_CLANG_NONBLOCKING {
-        size_type producerTail = mProducerTail.load();
-        size_type consumerTail = mConsumerHead.load();
-        return (mCapacity + producerTail - consumerTail) % mCapacity;
+    size_type count(std::memory_order order = std::memory_order_seq_cst) const noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
+        return mCount.load(order);
     }
 
     /**
@@ -272,7 +279,7 @@ public:
      *
      * @return The maximum number of items the queue can hold.
      */
-    size_type capacity() const noexcept SM_CLANG_NONBLOCKING {
+    size_type capacity() const noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
         return mCapacity - 1;
     }
 
@@ -297,56 +304,34 @@ public:
     }
 
     /**
-     * @brief Reset the queue to an empty state with the given storage and capacity.
-     *
-     * @pre @p capacity must be greater than zero.
-     * @pre @p storage must point to valid storage of at least @p capacity + 1 elements.
-     *
-     * The storage must be at least capacity + 1 elements in size. The queue takes ownership of the storage.
-     *
-     * @note This function is not thread-safe and should only be called when no other threads are accessing the queue.
-     *
-     * @param storage The storage to use for the queue.
-     * @param capacity The maximum number of elements the queue can hold.
-     * @param allocator The allocator used to allocate and deallocate the storage.
-     */
-    void reset(T* storage, size_type capacity, Allocator allocator) noexcept {
-        clear();
-
-        mAllocator = std::move(allocator);
-        mStorage = storage;
-        mCapacity = capacity + 1;
-        mFreeSize.store(capacity);
-        mUsedSize.store(0);
-        mProducerHead.store(0);
-        mProducerTail.store(0);
-        mConsumerTail.store(0);
-        mConsumerHead.store(0);
-    }
-
-    /**
      * @brief Create a new queue with the given capacity.
      *
-     * Constructs a new ring buffer with the specified capacity using the provided allocator.
-     * Returns an optional containing the created ring buffer on success, or std::nullopt on failure.
-     *
-     * @pre @p capacity must be greater than zero.
-     *
      * @param capacity The maximum number of elements the queue can hold.
      * @param allocator The allocator used to allocate and deallocate the storage.
      *
-     * @return The construction result.
-     * @retval std::nullopt The queue could not be created.
+     * @return The ring buffer if it was created successfully, std::nullopt otherwise.
      */
-    static std::optional<RingBuffer<T, Allocator>> create(size_type capacity, Allocator allocator = Allocator{}) noexcept {
-        assert(capacity > 0);
+    [[nodiscard]]
+    static std::optional<RingBuffer> create(size_type capacity, Allocator allocator = Allocator{}) noexcept {
+        if (capacity == 0) {
+            return std::nullopt;
+        }
 
-        T* storage = allocator.allocate(capacity + 1);
+        StorageAllocator storageAllocator{allocator};
+        size_t elementCount = detail::underlyingStorageElementCount<T>(capacity);
+        auto storage = storageAllocator.allocate(elementCount);
         if (storage == nullptr) {
             return std::nullopt;
         }
 
-        return RingBuffer{storage, capacity, std::move(allocator)};
+        BitsetWord* bitset = reinterpret_cast<BitsetWord*>(reinterpret_cast<std::byte*>(storage) + storageOffsetForBitset(capacity));
+
+        ElementIndex* elements = reinterpret_cast<ElementIndex*>(reinterpret_cast<std::byte*>(storage) + storageOffsetForElements(capacity));
+
+        std::uninitialized_fill_n(bitset, detail::requiredBitsetSize(capacity), 0);
+        std::uninitialized_fill_n(elements, capacity, std::numeric_limits<size_type>::max());
+
+        return RingBuffer{reinterpret_cast<std::byte*>(storage), capacity, std::move(allocator)};
     }
 };
 } // namespace sm::concurrent

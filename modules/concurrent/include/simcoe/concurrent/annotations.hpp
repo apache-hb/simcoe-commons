@@ -9,8 +9,8 @@
 #    if __has_attribute(blocking)
 #        define SM_CLANG_BLOCKING [[clang::blocking]]
 #    endif
-#    if __has_attribute(nonnull) && __has_attribute(noescape)
-#        define SM_OUTPARAM [[gnu::nonnull, clang::noescape]]
+#    if __has_attribute(reentrant)
+#        define SM_CLANG_REENTRANT [[clang::reentrant]]
 #    endif
 #endif
 
@@ -22,6 +22,6 @@
 #    define SM_CLANG_BLOCKING
 #endif
 
-#if !defined(SM_OUTPARAM)
-#    define SM_OUTPARAM
+#if !defined(SM_CLANG_REENTRANT)
+#    define SM_CLANG_REENTRANT
 #endif
