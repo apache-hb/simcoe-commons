@@ -33,6 +33,11 @@ install_headers(
   subdir: 'simcoe/concurrent',
 )
 
+install_headers(
+  'include/simcoe/concurrent/detail/ring_buffer_bitset_detail.hpp',
+  subdir: 'simcoe/concurrent/detail',
+)
+
 if gtest_main.found()
   testcases = {
     'mailbox': {
