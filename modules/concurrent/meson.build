@@ -24,6 +24,12 @@ meson.override_dependency(
   simcoe_concurrent_dep,
 )
 
+pkg.generate(
+  libsimcoe_concurrent,
+  description: 'simcoe-commons concurrent module',
+  url: url,
+)
+
 install_headers(
   'include/simcoe/concurrent/exports.hpp',
   'include/simcoe/concurrent/annotations.hpp',

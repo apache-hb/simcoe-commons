@@ -11,6 +11,12 @@ meson.override_dependency(
   simcoe_defer_dep,
 )
 
+pkg.generate(
+  name: 'simcoe-defer',
+  description: 'simcoe-commons defer module',
+  url: url,
+)
+
 install_headers(
   'include/simcoe/defer/defer.hpp',
   subdir: 'simcoe/defer',

@@ -12,6 +12,9 @@ project(
   ],
 )
 
+pkg = import('pkgconfig')
+url = 'https://github.com/apache-hb/simcoe-commons'
+
 tests_opt = get_option('tests').disable_auto_if(meson.is_subproject())
 docs_opt = get_option('docs').disable_auto_if(meson.is_subproject())
 
