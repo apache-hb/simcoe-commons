@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+
+#pragma once
+
+#define SIMCOE_VERSION_MAJOR @MAJOR@
+#define SIMCOE_VERSION_MINOR @MINOR@
+#define SIMCOE_VERSION_PATCH @PATCH@

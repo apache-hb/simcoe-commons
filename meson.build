@@ -28,6 +28,7 @@ doxygen = find_program(
   required: docs_opt,
 )
 
+subdir('modules/version')
 subdir('modules/defer')
 subdir('modules/concurrent')
 

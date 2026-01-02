@@ -3,7 +3,6 @@
 #pragma once
 
 #include <atomic>
-#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -78,12 +77,12 @@ private:
         return reinterpret_cast<T*>(mStorage);
     }
 
-    std::atomic<uint64_t>* getBitsetAddress() noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
-        return reinterpret_cast<std::atomic<uint64_t>*>(mStorage + storageOffsetForBitset(capacity()));
+    BitsetWord* getBitsetAddress() noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
+        return reinterpret_cast<BitsetWord*>(mStorage + storageOffsetForBitset(capacity()));
     }
 
-    std::atomic<size_type>* getElementAddress() noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
-        return reinterpret_cast<std::atomic<size_type>*>(mStorage + storageOffsetForElements(capacity()));
+    ElementIndex* getElementAddress() noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
+        return reinterpret_cast<ElementIndex*>(mStorage + storageOffsetForElements(capacity()));
     }
 
     T& getElementAt(size_type index) noexcept SM_CLANG_NONBLOCKING SM_CLANG_REENTRANT {
@@ -220,7 +219,11 @@ public:
             return false;
         }
 
+#if __cplusplus >= 202002L // Theres no feature test macro for std::construct_at
         std::construct_at(&getElementAt(index), std::move(value));
+#else
+        new (&getElementAt(index)) T(std::move(value));
+#endif
 
         auto head = mHead.fetch_add(1);
         auto elements = getElementAddress();
