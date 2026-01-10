@@ -28,9 +28,10 @@ doxygen = find_program(
   required: docs_opt,
 )
 
-subdir('modules/version')
-subdir('modules/defer')
 subdir('modules/concurrent')
+subdir('modules/container')
+subdir('modules/defer')
+subdir('modules/version')
 
 if doxygen.found()
   doxygen_config = configure_file(

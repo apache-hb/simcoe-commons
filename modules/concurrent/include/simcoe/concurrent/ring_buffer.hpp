@@ -34,8 +34,20 @@ template <typename T, typename Allocator = std::allocator<T>>
 #endif
 class RingBuffer {
 public:
+    /**
+     * @brief The size type of the ring buffer.
+     * The ring buffer can have a capacity of up to `std::numeric_limits<size_type>::max() - 1`.
+     */
     using size_type = uint32_t;
+
+    /**
+     * @brief The value type stored in the ring buffer.
+     */
     using value_type = T;
+
+    /**
+     * @brief The allocator type used by the ring buffer.
+     */
     using allocator_type = Allocator;
 
 private:
